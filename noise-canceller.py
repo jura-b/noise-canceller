@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 import wave
@@ -20,6 +21,9 @@ CHANNELS = 1
 
 load_dotenv()
 
+# Set up logger
+logger = logging.getLogger("noise-canceller")
+
 class AudioFileProcessor:
     def __init__(self, noise_filter):
         self.noise_filter = noise_filter
@@ -28,7 +32,7 @@ class AudioFileProcessor:
 
     async def process_file(self, input_path: Path, output_path: Path):
         """Process an audio file with LiveKit noise cancellation"""
-        print(f"Processing {input_path} -> {output_path}")
+        logger.info(f"Processing {input_path} -> {output_path}")
         
         # Load the input audio file
         audio_data = self._load_audio_file(input_path)
@@ -42,31 +46,32 @@ class AudioFileProcessor:
             
             # Save the processed audio
             self._save_output(output_path)
-            print(f"Processed audio saved to {output_path}")
+            logger.info(f"Processed audio saved to {output_path}")
             
         finally:
             if self.room:
                 await self.room.disconnect()
-                print("Disconnected from LiveKit room")
+                logger.info("Disconnected from LiveKit room")
 
     async def _process_with_noise_cancellation(self, audio_data):
         """Process audio data through noise cancellation"""
-        print("Setting up noise cancellation pipeline...")
+        logger.debug("Setting up noise cancellation pipeline...")
         
         # Step 1: Publish the raw audio as a microphone track
-        print("Publishing raw audio track...")
+        logger.debug("Publishing raw audio track...")
         file_source = FileAudioSource(audio_data, SAMPLERATE, CHANNELS)
         input_track = rtc.LocalAudioTrack.create_audio_track("raw-input", file_source)
         
         input_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-        _ = await self.room.local_participant.publish_track(input_track, input_options)
+        publication = await self.room.local_participant.publish_track(input_track, input_options)
         
         # Wait for track to be ready and subscribed
         await asyncio.sleep(0.5)
         
         # Step 2: Create a stream that receives from the participant with noise cancellation
-        print("Setting up noise-cancelled audio stream...")
+        logger.debug("Setting up noise-cancelled audio stream...")
         
+        filtered_stream = None
         try:
             # This is the key - create stream from participant with noise cancellation
             # Similar to how recorder.py and other agents do it
@@ -76,7 +81,7 @@ class AudioFileProcessor:
                 noise_cancellation=self.noise_filter
             )
             
-            print("Processing audio with noise cancellation...")
+            logger.debug("Processing audio with noise cancellation...")
             
             # Step 3: Feed audio data and capture processed output
             chunk_count = len(audio_data) // SAMPLES_PER_CHUNK
@@ -90,20 +95,35 @@ class AudioFileProcessor:
             # Wait for both tasks with timeout
             try:
                 await asyncio.wait_for(asyncio.gather(feed_task, capture_task), timeout=120.0)
-                print(f"Successfully processed {len(self.processed_frames)} frames")
+                logger.info(f"Successfully processed {len(self.processed_frames)} frames")
                 
             except asyncio.TimeoutError:
-                print("Processing timed out")
+                logger.warning("Processing timed out")
                 feed_task.cancel()
                 capture_task.cancel()
                 
         except Exception as e:
-            print(f"Error setting up noise cancellation: {e}")
+            logger.error(f"Error setting up noise cancellation: {e}")
             raise
+        finally:
+            # Clean up resources to avoid task cancellation warnings
+            if filtered_stream:
+                try:
+                    logger.debug("Cleaning up audio stream...")
+                    await filtered_stream.aclose()
+                except Exception as e:
+                    logger.debug(f"Note: Audio stream cleanup completed with message: {e}")
+            
+            # Unpublish the track
+            try:
+                logger.debug("Unpublishing audio track...")
+                await self.room.local_participant.unpublish_track(publication.sid)
+            except Exception as e:
+                logger.debug(f"Note: Track unpublish completed with message: {e}")
 
     async def _feed_audio_data(self, file_source, audio_data, chunk_count):
         """Feed audio data to the source with precise timing"""
-        print(f"Feeding {chunk_count} audio chunks...")
+        logger.debug(f"Feeding {chunk_count} audio chunks...")
         
         # Use more precise timing based on actual sample rate
         chunk_duration = SAMPLES_PER_CHUNK / SAMPLERATE  # Exact duration in seconds
@@ -138,11 +158,11 @@ class AudioFileProcessor:
                 await asyncio.sleep(delay)
             
             if (i + 1) % 500 == 0 or i == chunk_count - 1:
-                print(f"Fed {i + 1}/{chunk_count} chunks")
+                logger.debug(f"Fed {i + 1}/{chunk_count} chunks")
 
     async def _capture_filtered_audio(self, filtered_stream, expected_chunks):
         """Capture the noise-cancelled audio output"""
-        print("Capturing noise-cancelled audio...")
+        logger.debug("Capturing noise-cancelled audio...")
         captured = 0
         
         # Wait a moment for stream to be ready
@@ -155,19 +175,15 @@ class AudioFileProcessor:
                 captured += 1
                 
                 if captured % 500 == 0 or captured >= expected_chunks:
-                    print(f"Captured {captured} processed chunks")
+                    logger.debug(f"Captured {captured} processed chunks")
                 
                 if captured >= expected_chunks:
                     break
                     
         except Exception as e:
-            print(f"Error capturing processed audio: {e}")
+            logger.error(f"Error capturing processed audio: {e}")
             
-        print(f"Audio capture complete: {captured} chunks captured")
-
-
-
-
+        logger.info(f"Audio capture complete: {captured} chunks captured")
 
     def _load_audio_file(self, input_path: Path):
         """Load and preprocess audio file (supports WAV, FLAC, OGG, MP3, M4A, etc.)"""
@@ -183,8 +199,8 @@ class AudioFileProcessor:
             
             duration_s = len(audio_data) / sample_rate
             
-            print(f"Input: {sample_rate}Hz, {channels} channels, {duration_s:.2f}s")
-            print(f"Detected format: {input_path.suffix}")
+            logger.info(f"Input: {sample_rate}Hz, {channels} channels, {duration_s:.2f}s")
+            logger.info(f"Detected format: {input_path.suffix}")
             
             # Convert to numpy array with proper shape
             if channels == 1 and audio_data.ndim == 1:
@@ -195,14 +211,14 @@ class AudioFileProcessor:
             # Resample to 48kHz mono if needed
             if sample_rate != SAMPLERATE or channels != CHANNELS:
                 audio_array = self._resample_audio(audio_array, sample_rate, channels)
-                print(f"Resampled to: {SAMPLERATE}Hz, {CHANNELS} channels")
+                logger.info(f"Resampled to: {SAMPLERATE}Hz, {CHANNELS} channels")
             
             return audio_array
             
         except Exception as e:
-            print(f"Error loading audio file: {e}")
-            print(f"Supported formats: WAV, FLAC, OGG, MP3 (with ffmpeg), M4A, and more")
-            print(f"Make sure you have ffmpeg installed for MP3/M4A support")
+            logger.error(f"Error loading audio file: {e}")
+            logger.error(f"Supported formats: WAV, FLAC, OGG, MP3 (with ffmpeg), M4A, and more")
+            logger.error(f"Make sure you have ffmpeg installed for MP3/M4A support")
             raise
 
     def _resample_audio(self, audio_array, original_rate, original_channels):
@@ -219,7 +235,7 @@ class AudioFileProcessor:
         
         # High-quality resampling with LiveKit's AudioResampler if needed
         if original_rate != SAMPLERATE:
-            print(f"Resampling from {original_rate}Hz to {SAMPLERATE}Hz using LiveKit AudioResampler...")
+            logger.debug(f"Resampling from {original_rate}Hz to {SAMPLERATE}Hz using LiveKit AudioResampler...")
             
             # Create LiveKit AudioResampler with high quality
             resampler = rtc.AudioResampler(
@@ -246,14 +262,14 @@ class AudioFileProcessor:
                 resampled_data = b''.join(frame.data for frame in output_frames)
                 audio_array = np.frombuffer(resampled_data, dtype=np.int16)
             else:
-                print("Warning: No output from AudioResampler, using original data")
+                logger.warning("Warning: No output from AudioResampler, using original data")
         
         return audio_array
 
     def _save_output(self, output_path: Path):
         """Save processed audio frames to output file"""
         if not self.processed_frames:
-            print("Warning: No processed frames to save")
+            logger.warning("Warning: No processed frames to save")
             return
             
         with wave.open(str(output_path), 'wb') as wav_file:
@@ -292,7 +308,7 @@ class AudioFileProcessor:
                 auto_subscribe=False,
             ),
         )
-        print(f"Connected to LiveKit Cloud room for authentication / metering")
+        logger.info(f"Connected to LiveKit Cloud room for authentication / metering")
         return room
 
 
@@ -301,6 +317,28 @@ class FileAudioSource(rtc.AudioSource):
     def __init__(self, audio_data, sample_rate=SAMPLERATE, num_channels=CHANNELS):
         super().__init__(sample_rate, num_channels)
         self.audio_data = audio_data
+
+
+def setup_logging(log_level: str):
+    """Setup logging configuration"""
+    level = getattr(logging, log_level.upper())
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=level,
+        handlers=[console_handler],
+        force=True
+    )
 
 
 async def main():
@@ -340,19 +378,28 @@ Environment variables:
         default="NC",
         help="Noise cancellation filter type (default: NC)"
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="Set the logging level (default: INFO)"
+    )
     
     args = parser.parse_args()
     
+    # Setup logging
+    setup_logging(args.log_level)
+    
     # Check environment
     if not os.getenv("LIVEKIT_URL"):
-        print("Error: LIVEKIT_URL environment variable is required")
-        print("Set it to your LiveKit server URL, e.g., wss://your-project.livekit.cloud")
+        logger.error("Error: LIVEKIT_URL environment variable is required")
+        logger.error("Set it to your LiveKit server URL, e.g., wss://your-project.livekit.cloud")
         sys.exit(1)
     
     # Validate input file
     input_path = Path(args.input_file)
     if not input_path.exists():
-        print(f"Error: Input file '{input_path}' does not exist")
+        logger.error(f"Error: Input file '{input_path}' does not exist")
         sys.exit(1)
     
     # Set output path
@@ -372,17 +419,17 @@ Environment variables:
     else:
         noise_filter = noise_cancellation.NC()
     
-    print(f"Using {args.filter if args.filter != 'NC' else 'NC (default)'} noise cancellation filter")
-    print(f"Output will be saved to {output_path}")
-    print("Note: This tool requires a LiveKit Cloud account for noise cancellation")
+    logger.info(f"Using {args.filter if args.filter != 'NC' else 'NC (default)'} noise cancellation filter")
+    logger.info(f"Output will be saved to {output_path}")
+    logger.info("Note: This tool requires a LiveKit Cloud account for noise cancellation")
     
     # Process the file
     try:
         processor = AudioFileProcessor(noise_filter)
         await processor.process_file(input_path, output_path)
-        print("\nProcessing complete!")
+        logger.info("Processing complete!")
     except Exception as e:
-        print(f"Error processing file: {e}")
+        logger.error(f"Error processing file: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
