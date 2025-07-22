@@ -74,19 +74,21 @@ class NullProgress:
         pass
 
 class AudioFileProcessor:
-    def __init__(self, noise_filter, silent=False):
+    def __init__(self, noise_filter, use_webrtc=False, silent=False):
         self.noise_filter = noise_filter
+        self.use_webrtc = use_webrtc
         self.processed_frames = []
         self.room = None
         self.progress = None
         self.silent = silent
 
     async def process_file(self, input_path: Path, output_path: Path):
-        """Process an audio file with LiveKit noise cancellation"""
+        """Process an audio file with LiveKit noise cancellation or WebRTC noise suppression"""
         if not self.silent:
             # Create beautiful header panel
+            processing_type = "WebRTC Noise Suppression" if self.use_webrtc else "LiveKit Enhanced Noise Cancellation"
             header = Panel.fit(
-                f"🎵 [bold cyan]Audio Noise Cancellation[/bold cyan] 🎵\n"
+                f"🎵 [bold cyan]Audio {processing_type}[/bold cyan] 🎵\n"
                 f"[dim]Powered by LiveKit Cloud[/dim]",
                 style="cyan"
             )
@@ -100,7 +102,12 @@ class AudioFileProcessor:
             
             file_info.add_row("Input File", str(input_path))
             file_info.add_row("Output File", str(output_path))
-            file_info.add_row("Filter Type", self.noise_filter.__class__.__name__)
+            if self.use_webrtc:
+                file_info.add_row("Processing Type", "WebRTC AudioProcessingModule")
+                file_info.add_row("Features", "Noise Suppression + Echo Cancellation + High-pass Filter")
+            else:
+                file_info.add_row("Processing Type", "LiveKit Enhanced")
+                file_info.add_row("Filter Type", self.noise_filter.__class__.__name__)
             
             console.print(file_info)
             console.print()
@@ -109,13 +116,17 @@ class AudioFileProcessor:
         with console.status("[bold green]Loading audio file...", spinner="dots"):
             audio_data = self._load_audio_file(input_path)
         
-        # Connect to LiveKit room (required for noise cancellation authentication)
+        # Connect to LiveKit room (required for authentication)
         with console.status("[bold blue]Connecting to LiveKit Cloud...", spinner="dots"):
             self.room = await self._connect_to_room()
         
         try:
-            # Process audio with noise cancellation and beautiful progress bars
-            await self._process_with_noise_cancellation(audio_data)
+            if self.use_webrtc:
+                # Process with WebRTC AudioProcessingModule
+                await self._process_with_webrtc_apm(audio_data)
+            else:
+                # Process with LiveKit enhanced noise cancellation
+                await self._process_with_noise_cancellation(audio_data)
             
             # Save the processed audio
             with console.status("[bold green]Saving processed audio...", spinner="dots"):
@@ -135,8 +146,67 @@ class AudioFileProcessor:
                 await self.room.disconnect()
                 logger.debug("Disconnected from LiveKit room")
 
+    async def _process_with_webrtc_apm(self, audio_data):
+        """Process audio data using WebRTC AudioProcessingModule"""
+        chunk_count = len(audio_data) // SAMPLES_PER_CHUNK
+        if len(audio_data) % SAMPLES_PER_CHUNK != 0:
+            chunk_count += 1
+        
+        if not self.silent:
+            console.print("🔧 [yellow]Initializing WebRTC AudioProcessingModule...[/yellow]")
+        
+        # Create WebRTC AudioProcessingModule with noise suppression enabled
+        apm = rtc.AudioProcessingModule(
+            noise_suppression=True,
+            echo_cancellation=True,  # Also enable echo cancellation for better results
+            high_pass_filter=True,   # High-pass filter removes low-frequency noise
+            auto_gain_control=False  # Keep gain control disabled for file processing
+        )
+        
+        # Process audio in 10ms chunks (required by WebRTC APM)
+        progress_class = NullProgress if self.silent else Progress
+        
+        with progress_class(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            
+            process_task = progress.add_task("🎙️ Processing with WebRTC APM", total=chunk_count)
+            
+            for i in range(chunk_count):
+                start_idx = i * SAMPLES_PER_CHUNK
+                end_idx = min(start_idx + SAMPLES_PER_CHUNK, len(audio_data))
+                chunk = audio_data[start_idx:end_idx]
+                
+                # Pad last chunk if necessary with silence
+                if len(chunk) < SAMPLES_PER_CHUNK:
+                    chunk = np.concatenate([chunk, np.zeros(SAMPLES_PER_CHUNK - len(chunk), dtype=np.int16)])
+                
+                # Create audio frame (WebRTC APM requires exactly 10ms frames)
+                audio_frame = rtc.AudioFrame(
+                    data=chunk.tobytes(),
+                    sample_rate=SAMPLERATE,
+                    num_channels=CHANNELS,
+                    samples_per_channel=len(chunk)
+                )
+                
+                # Process frame in-place with WebRTC APM
+                apm.process_stream(audio_frame)
+                
+                # Store processed frame
+                self.processed_frames.append(audio_frame.data.tobytes())
+                
+                # Update progress
+                progress.update(process_task, advance=1)
+            
+            logger.info(f"Successfully processed {len(self.processed_frames)} frames with WebRTC APM")
+
     async def _process_with_noise_cancellation(self, audio_data):
-        """Process audio data through noise cancellation with progress tracking"""
+        """Process audio data through LiveKit enhanced noise cancellation with progress tracking"""
         chunk_count = len(audio_data) // SAMPLES_PER_CHUNK
         if len(audio_data) % SAMPLES_PER_CHUNK != 0:
             chunk_count += 1
@@ -498,6 +568,7 @@ async def main():
   uv run noise-canceller.py input.mp3
   uv run noise-canceller.py input.wav -o clean_audio.wav
   uv run noise-canceller.py song.flac --filter BVC
+  uv run noise-canceller.py audio.m4a --filter WebRTC
   uv run noise-canceller.py audio.m4a -o processed.wav --silent
   
 📁 Supported formats: MP3, WAV, FLAC, OGG, M4A, AAC, AIFF, and more
@@ -524,9 +595,9 @@ async def main():
     )
     parser.add_argument(
         "--filter",
-        choices=["NC", "BVC", "BVCTelephony"],
+        choices=["NC", "BVC", "BVCTelephony", "WebRTC"],
         default="NC",
-        help="Noise cancellation filter type (default: NC)"
+        help="Noise cancellation filter type (default: NC). WebRTC uses built-in WebRTC noise suppression."
     )
     parser.add_argument(
         "--log-level",
@@ -580,29 +651,36 @@ async def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path(f"output/{input_path.stem}-processed.wav")
+        filter_suffix = args.filter.lower()
+        output_path = Path(f"output/{input_path.stem}-{filter_suffix}-processed.wav")
     
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Choose noise cancellation filter
-    filter_map = {
-        "BVC": noise_cancellation.BVC(),
-        "BVCTelephony": noise_cancellation.BVCTelephony(),
-        "NC": noise_cancellation.NC()
-    }
-    noise_filter = filter_map[args.filter]
+    use_webrtc = args.filter == "WebRTC"
+    if use_webrtc:
+        # For WebRTC, we don't need a LiveKit noise filter
+        noise_filter = None
+    else:
+        filter_map = {
+            "BVC": noise_cancellation.BVC(),
+            "BVCTelephony": noise_cancellation.BVCTelephony(),
+            "NC": noise_cancellation.NC()
+        }
+        noise_filter = filter_map[args.filter]
     
     # Process the file
     try:
-        processor = AudioFileProcessor(noise_filter, silent=args.silent)
+        processor = AudioFileProcessor(noise_filter, use_webrtc=use_webrtc, silent=args.silent)
         await processor.process_file(input_path, output_path)
         
         if not args.silent:
             # Final success message
+            processing_type = "WebRTC" if use_webrtc else "LiveKit Enhanced"
             final_panel = Panel.fit(
                 "🎉 [bold green]All Done![/bold green]\n"
-                f"[dim]Your noise-cancelled audio is ready at:[/dim]\n"
+                f"[dim]Your {processing_type} noise-cancelled audio is ready at:[/dim]\n"
                 f"[cyan]{output_path}[/cyan]",
                 style="green"
             )

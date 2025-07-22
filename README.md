@@ -36,6 +36,9 @@ uv run noise-canceller.py input.wav -o clean_audio.wav
 
 # Use different noise cancellation filter
 uv run noise-canceller.py input.flac --filter BVC
+
+# Use WebRTC built-in noise suppression (faster, local processing)
+uv run noise-canceller.py input.wav --filter WebRTC
 ```
 
 ### Filter Types
@@ -43,6 +46,7 @@ uv run noise-canceller.py input.flac --filter BVC
 - **NC**: Standard enhanced noise cancellation (default)
 - **BVC**: Background voice cancellation (removes background voices + noise)
 - **BVCTelephony**: BVC optimized for telephony applications
+- **WebRTC**: For comparison purposes, apply WebRTC built-in `noise_suppression` to the audio
 
 ## License
 
