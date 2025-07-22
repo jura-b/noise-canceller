@@ -4,7 +4,7 @@ A command-line tool that processes audio files with the LiveKit [enhanced noise 
 
 ## Limitations
 
-- **Requires LiveKit Cloud**: As noise cancellation is a feature of paid LiveKit Cloud accounts, this tool consumes real connection minutes.
+- **Requires LiveKit Cloud**: As noise cancellation is a feature of paid LiveKit Cloud accounts, this tool consumes real connection minutes while in use (even though it runs locally).
 - **Realtime output**: This tool outputs in realtime speed, so a 5 minute audio file will take 5 minutes to process.
 
 ## Installation

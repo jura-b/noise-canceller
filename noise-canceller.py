@@ -30,41 +30,80 @@ CHANNELS = 1
 
 load_dotenv()
 
-# Initialize Rich console
+# Initialize Rich console (will be updated based on silent mode)
 console = Console()
 
 # Set up logger with Rich
 logger = logging.getLogger("noise-canceller")
 
+class NullConsole:
+    """A console that suppresses all output for silent mode"""
+    def print(self, *args, **kwargs):
+        pass
+    
+    def status(self, *args, **kwargs):
+        return NullContext()
+    
+    def print_exception(self, *args, **kwargs):
+        pass
+
+class NullContext:
+    """A context manager that does nothing"""
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        pass
+
+class NullProgress:
+    """A progress tracker that does nothing for silent mode"""
+    def __init__(self, *args, **kwargs):
+        # Accept any arguments but ignore them
+        pass
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        pass
+    
+    def add_task(self, *args, **kwargs):
+        return 0
+    
+    def update(self, *args, **kwargs):
+        pass
+
 class AudioFileProcessor:
-    def __init__(self, noise_filter):
+    def __init__(self, noise_filter, silent=False):
         self.noise_filter = noise_filter
         self.processed_frames = []
         self.room = None
         self.progress = None
+        self.silent = silent
 
     async def process_file(self, input_path: Path, output_path: Path):
         """Process an audio file with LiveKit noise cancellation"""
-        # Create beautiful header panel
-        header = Panel.fit(
-            f"🎵 [bold cyan]Audio Noise Cancellation[/bold cyan] 🎵\n"
-            f"[dim]Powered by LiveKit Cloud[/dim]",
-            style="cyan"
-        )
-        console.print(header)
-        console.print()
+        if not self.silent:
+            # Create beautiful header panel
+            header = Panel.fit(
+                f"🎵 [bold cyan]Audio Noise Cancellation[/bold cyan] 🎵\n"
+                f"[dim]Powered by LiveKit Cloud[/dim]",
+                style="cyan"
+            )
+            console.print(header)
+            console.print()
 
-        # Show file info table
-        file_info = Table(title="📁 File Information", show_header=True, header_style="bold magenta")
-        file_info.add_column("Property", style="cyan")
-        file_info.add_column("Value", style="green")
-        
-        file_info.add_row("Input File", str(input_path))
-        file_info.add_row("Output File", str(output_path))
-        file_info.add_row("Filter Type", self.noise_filter.__class__.__name__)
-        
-        console.print(file_info)
-        console.print()
+            # Show file info table
+            file_info = Table(title="📁 File Information", show_header=True, header_style="bold magenta")
+            file_info.add_column("Property", style="cyan")
+            file_info.add_column("Value", style="green")
+            
+            file_info.add_row("Input File", str(input_path))
+            file_info.add_row("Output File", str(output_path))
+            file_info.add_row("Filter Type", self.noise_filter.__class__.__name__)
+            
+            console.print(file_info)
+            console.print()
         
         # Load the input audio file
         with console.status("[bold green]Loading audio file...", spinner="dots"):
@@ -82,13 +121,14 @@ class AudioFileProcessor:
             with console.status("[bold green]Saving processed audio...", spinner="dots"):
                 self._save_output(output_path)
             
-            # Success message
-            success_panel = Panel.fit(
-                f"✅ [bold green]Processing Complete![/bold green]\n"
-                f"[dim]Clean audio saved to: {output_path}[/dim]",
-                style="green"
-            )
-            console.print(success_panel)
+            if not self.silent:
+                # Success message
+                success_panel = Panel.fit(
+                    f"✅ [bold green]Processing Complete![/bold green]\n"
+                    f"[dim]Clean audio saved to: {output_path}[/dim]",
+                    style="green"
+                )
+                console.print(success_panel)
             
         finally:
             if self.room:
@@ -102,15 +142,20 @@ class AudioFileProcessor:
             chunk_count += 1
         
         # Step 1: Publish the raw audio as a microphone track
-        logger.debug("Publishing raw audio track...")
-        file_source = FileAudioSource(audio_data, SAMPLERATE, CHANNELS)
-        input_track = rtc.LocalAudioTrack.create_audio_track("raw-input", file_source)
+        with console.status("[bold yellow]Publishing audio track to LiveKit room...", spinner="dots"):
+            logger.debug("Publishing raw audio track...")
+            file_source = FileAudioSource(audio_data, SAMPLERATE, CHANNELS)
+            input_track = rtc.LocalAudioTrack.create_audio_track("raw-input", file_source)
+            
+            input_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
+            publication = await self.room.local_participant.publish_track(input_track, input_options)
+            
+            # Wait for track to be ready and subscribed
+            await asyncio.sleep(0.5)
         
-        input_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-        publication = await self.room.local_participant.publish_track(input_track, input_options)
-        
-        # Wait for track to be ready and subscribed
-        await asyncio.sleep(0.5)
+        # Show simple track publication info
+        if not self.silent:
+            await self._show_publication_info(publication)
         
         # Step 2: Create a stream that receives from the participant with noise cancellation
         logger.debug("Setting up noise-cancelled audio stream...")
@@ -125,7 +170,9 @@ class AudioFileProcessor:
             )
             
             # Step 3: Feed audio data and capture processed output with progress bars
-            with Progress(
+            progress_class = NullProgress if self.silent else Progress
+            
+            with progress_class(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
@@ -148,10 +195,12 @@ class AudioFileProcessor:
                     logger.info(f"Successfully processed {len(self.processed_frames)} frames")
                     
                 except asyncio.TimeoutError:
-                    console.print("⚠️  [yellow]Processing timed out[/yellow]")
+                    if not self.silent:
+                        console.print("⚠️  [yellow]Processing timed out[/yellow]")
                     
         except Exception as e:
-            console.print(f"❌ [red]Error setting up noise cancellation: {e}[/red]")
+            if not self.silent:
+                console.print(f"❌ [red]Error setting up noise cancellation: {e}[/red]")
             raise
         finally:
             # Clean up resources
@@ -203,6 +252,22 @@ class AudioFileProcessor:
             if delay > 0:
                 await asyncio.sleep(delay)
 
+    async def _show_publication_info(self, publication):
+        """Show simple track publication info"""
+        try:
+            if publication:
+                console.print(f"✅ [green]Track published: [bold]{publication.name}[/bold] (SID: {publication.sid})[/green]")
+                console.print(f"🏠 [cyan]Room: {self.room.name or 'noise-canceller-room'}[/cyan]")
+                console.print()  # Add blank line for clean output
+                logger.info(f"Track '{publication.name}' published with SID: {publication.sid}")
+            else:
+                console.print("❌ [red]Failed to publish track to room[/red]")
+                raise Exception("Track publication failed")
+                
+        except Exception as e:
+            console.print(f"❌ [red]Error showing publication info: {e}[/red]")
+            raise
+
     async def _capture_filtered_audio_with_progress(self, filtered_stream, expected_chunks, progress, task_id):
         """Capture the noise-cancelled audio output with progress updates"""
         captured = 0
@@ -223,7 +288,8 @@ class AudioFileProcessor:
                     break
                     
         except Exception as e:
-            console.print(f"❌ [red]Error capturing processed audio: {e}[/red]")
+            if not self.silent:
+                console.print(f"❌ [red]Error capturing processed audio: {e}[/red]")
 
     def _load_audio_file(self, input_path: Path):
         """Load and preprocess audio file"""
@@ -239,18 +305,19 @@ class AudioFileProcessor:
             
             duration_s = len(audio_data) / sample_rate
             
-            # Create audio info table
-            audio_info = Table(title="🎵 Audio Properties", show_header=True, header_style="bold blue")
-            audio_info.add_column("Property", style="cyan")
-            audio_info.add_column("Value", style="green")
-            
-            audio_info.add_row("Sample Rate", f"{sample_rate:,} Hz")
-            audio_info.add_row("Channels", str(channels))
-            audio_info.add_row("Duration", f"{duration_s:.2f} seconds")
-            audio_info.add_row("Format", input_path.suffix.upper())
-            
-            console.print(audio_info)
-            console.print()
+            if not self.silent:
+                # Create audio info table
+                audio_info = Table(title="🎵 Audio Properties", show_header=True, header_style="bold blue")
+                audio_info.add_column("Property", style="cyan")
+                audio_info.add_column("Value", style="green")
+                
+                audio_info.add_row("Sample Rate", f"{sample_rate:,} Hz")
+                audio_info.add_row("Channels", str(channels))
+                audio_info.add_row("Duration", f"{duration_s:.2f} seconds")
+                audio_info.add_row("Format", input_path.suffix.upper())
+                
+                console.print(audio_info)
+                console.print()
             
             # Convert to numpy array with proper shape
             if channels == 1 and audio_data.ndim == 1:
@@ -261,15 +328,20 @@ class AudioFileProcessor:
             # Resample to 48kHz mono if needed
             if sample_rate != SAMPLERATE or channels != CHANNELS:
                 audio_array = self._resample_audio(audio_array, sample_rate, channels)
-                console.print(f"🔄 [yellow]Resampled to: {SAMPLERATE}Hz, {CHANNELS} channel(s)[/yellow]")
-                console.print()
+                if not self.silent:
+                    console.print(f"🔄 [yellow]Resampled to: {SAMPLERATE}Hz, {CHANNELS} channel(s)[/yellow]")
+                    console.print()
             
             return audio_array
             
         except Exception as e:
-            console.print(f"❌ [red]Error loading audio file: {e}[/red]")
-            console.print("[dim]Supported formats: WAV, FLAC, OGG, MP3 (with ffmpeg), M4A, and more[/dim]")
-            console.print("[dim]Make sure you have ffmpeg installed for MP3/M4A support[/dim]")
+            if not self.silent:
+                console.print(f"❌ [red]Error loading audio file: {e}[/red]")
+                console.print("[dim]Supported formats: WAV, FLAC, OGG, MP3 (with ffmpeg), M4A, and more[/dim]")
+                console.print("[dim]Make sure you have ffmpeg installed for MP3/M4A support[/dim]")
+            else:
+                # In silent mode, still show critical errors to stderr
+                sys.stderr.write(f"ERROR: Failed to load audio file - {str(e)}\n")
             raise
 
     def _resample_audio(self, audio_array, original_rate, original_channels):
@@ -306,14 +378,16 @@ class AudioFileProcessor:
                 resampled_data = b''.join(frame.data for frame in output_frames)
                 audio_array = np.frombuffer(resampled_data, dtype=np.int16)
             else:
-                console.print("⚠️  [yellow]Warning: No output from AudioResampler, using original data[/yellow]")
+                if not self.silent:
+                    console.print("⚠️  [yellow]Warning: No output from AudioResampler, using original data[/yellow]")
         
         return audio_array
 
     def _save_output(self, output_path: Path):
         """Save processed audio frames to output file"""
         if not self.processed_frames:
-            console.print("⚠️  [yellow]Warning: No processed frames to save[/yellow]")
+            if not self.silent:
+                console.print("⚠️  [yellow]Warning: No processed frames to save[/yellow]")
             return
             
         with wave.open(str(output_path), 'wb') as wav_file:
@@ -345,6 +419,26 @@ class AudioFileProcessor:
             raise ValueError("LIVEKIT_URL environment variable is required")
 
         room = rtc.Room()
+        
+        # Set up event handlers for track publication verification
+        @room.on("track_published")
+        def on_track_published(publication, participant):
+            if participant == room.local_participant:
+                logger.info(f"🎵 Local track published: {publication.name} (SID: {publication.sid})")
+                if not self.silent:
+                    console.print(f"🎵 [green]Track '{publication.name}' published to room[/green]")
+        
+        @room.on("track_unpublished")
+        def on_track_unpublished(publication, participant):
+            if participant == room.local_participant:
+                logger.info(f"🔇 Local track unpublished: {publication.name} (SID: {publication.sid})")
+                if not self.silent:
+                    console.print(f"🔇 [yellow]Track '{publication.name}' unpublished from room[/yellow]")
+        
+        @room.on("participant_connected")
+        def on_participant_connected(participant):
+            logger.debug(f"Participant connected: {participant.identity}")
+        
         await room.connect(
             url,
             token,
@@ -363,27 +457,37 @@ class FileAudioSource(rtc.AudioSource):
         self.audio_data = audio_data
 
 
-def setup_logging(log_level: str):
+def setup_logging(log_level: str, silent: bool = False):
     """Setup beautiful Rich logging configuration"""
     level = getattr(logging, log_level.upper())
     
-    # Create Rich handler with beautiful formatting
-    rich_handler = RichHandler(
-        console=console,
-        show_time=True,
-        show_level=True,
-        show_path=False,
-        rich_tracebacks=True,
-        tracebacks_suppress=[rtc, api, noise_cancellation]
-    )
-    
-    # Configure logging
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        handlers=[rich_handler],
-        force=True
-    )
+    if silent:
+        # For silent mode, still allow WARNING and above to be logged to stderr
+        # This helps with debugging while keeping output clean
+        logging.basicConfig(
+            level=logging.WARNING,  # Allow warnings and errors
+            format="%(levelname)s: %(message)s",
+            handlers=[logging.StreamHandler(sys.stderr)],  # Send to stderr
+            force=True
+        )
+    else:
+        # Create Rich handler with beautiful formatting
+        rich_handler = RichHandler(
+            console=console,
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            rich_tracebacks=True,
+            tracebacks_suppress=[rtc, api, noise_cancellation]
+        )
+        
+        # Configure logging
+        logging.basicConfig(
+            level=level,
+            format="%(message)s",
+            handlers=[rich_handler],
+            force=True
+        )
 
 
 async def main():
@@ -394,10 +498,11 @@ async def main():
   uv run noise-canceller.py input.mp3
   uv run noise-canceller.py input.wav -o clean_audio.wav
   uv run noise-canceller.py song.flac --filter BVC
-  uv run noise-canceller.py audio.m4a -o processed.wav
+  uv run noise-canceller.py audio.m4a -o processed.wav --silent
   
 📁 Supported formats: MP3, WAV, FLAC, OGG, M4A, AAC, AIFF, and more
 📝 Note: Some formats may require ffmpeg to be installed
+📡 The tool will show track publication status automatically
   
 🔧 Environment variables:
   LIVEKIT_URL: Your LiveKit Cloud server URL
@@ -429,28 +534,46 @@ async def main():
         default="INFO",
         help="Set the logging level (default: INFO)"
     )
+    parser.add_argument(
+        "-s", "--silent",
+        action="store_true",
+        help="Suppress all output (silent mode)"
+    )
+
     
     args = parser.parse_args()
     
+    # Setup console for silent mode
+    global console
+    if args.silent:
+        console = NullConsole()
+    
     # Setup beautiful logging
-    setup_logging(args.log_level)
+    setup_logging(args.log_level, args.silent)
     
     # Check environment with beautiful error messages
     if not os.getenv("LIVEKIT_URL"):
-        error_panel = Panel.fit(
-            "❌ [bold red]Missing Environment Variable[/bold red]\n\n"
-            "[dim]LIVEKIT_URL environment variable is required.[/dim]\n"
-            "[dim]Set it to your LiveKit server URL, e.g.:[/dim]\n"
-            "[cyan]export LIVEKIT_URL=wss://your-project.livekit.cloud[/cyan]",
-            style="red"
-        )
-        console.print(error_panel)
+        if not args.silent:
+            error_panel = Panel.fit(
+                "❌ [bold red]Missing Environment Variable[/bold red]\n\n"
+                "[dim]LIVEKIT_URL environment variable is required.[/dim]\n"
+                "[dim]Set it to your LiveKit server URL, e.g.:[/dim]\n"
+                "[cyan]export LIVEKIT_URL=wss://your-project.livekit.cloud[/cyan]",
+                style="red"
+            )
+            console.print(error_panel)
+        else:
+            # In silent mode, still show critical errors to stderr
+            sys.stderr.write("ERROR: LIVEKIT_URL environment variable is required\n")
         sys.exit(1)
     
     # Validate input file
     input_path = Path(args.input_file)
     if not input_path.exists():
-        console.print(f"❌ [red]Input file '{input_path}' does not exist[/red]")
+        if not args.silent:
+            console.print(f"❌ [red]Input file '{input_path}' does not exist[/red]")
+        else:
+            sys.stderr.write(f"ERROR: Input file '{input_path}' does not exist\n")
         sys.exit(1)
     
     # Set output path
@@ -472,30 +595,35 @@ async def main():
     
     # Process the file
     try:
-        processor = AudioFileProcessor(noise_filter)
+        processor = AudioFileProcessor(noise_filter, silent=args.silent)
         await processor.process_file(input_path, output_path)
         
-        # Final success message
-        final_panel = Panel.fit(
-            "🎉 [bold green]All Done![/bold green]\n"
-            f"[dim]Your noise-cancelled audio is ready at:[/dim]\n"
-            f"[cyan]{output_path}[/cyan]",
-            style="green"
-        )
-        console.print()
-        console.print(final_panel)
+        if not args.silent:
+            # Final success message
+            final_panel = Panel.fit(
+                "🎉 [bold green]All Done![/bold green]\n"
+                f"[dim]Your noise-cancelled audio is ready at:[/dim]\n"
+                f"[cyan]{output_path}[/cyan]",
+                style="green"
+            )
+            console.print()
+            console.print(final_panel)
         
     except Exception as e:
-        error_panel = Panel.fit(
-            f"💥 [bold red]Processing Failed[/bold red]\n\n"
-            f"[dim]Error details:[/dim]\n"
-            f"[red]{str(e)}[/red]",
-            style="red"
-        )
-        console.print(error_panel)
-        
-        if args.log_level == "DEBUG":
-            console.print_exception()
+        if not args.silent:
+            error_panel = Panel.fit(
+                f"💥 [bold red]Processing Failed[/bold red]\n\n"
+                f"[dim]Error details:[/dim]\n"
+                f"[red]{str(e)}[/red]",
+                style="red"
+            )
+            console.print(error_panel)
+            
+            if args.log_level == "DEBUG":
+                console.print_exception()
+        else:
+            # In silent mode, still show critical errors to stderr
+            sys.stderr.write(f"ERROR: Processing failed - {str(e)}\n")
         sys.exit(1)
 
 
