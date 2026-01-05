@@ -1,3 +1,14 @@
+---
+title: Noise Canceller
+emoji: 🎙️
+colorFrom: blue
+colorTo: purple
+sdk: gradio
+sdk_version: "5.0.0"
+app_file: app.py
+pinned: false
+---
+
 # LiveKit Audio Noise Canceller
 
 A command-line tool that processes audio files with the LiveKit [enhanced noise cancellation](https://docs.livekit.io/cloud/noise-cancellation/) feature. Useful for testing, verification, or offline use.
@@ -47,6 +58,24 @@ uv run noise-canceller.py input.wav --filter WebRTC
 - **BVC**: Background voice cancellation (removes background voices + noise)
 - **BVCTelephony**: BVC optimized for telephony applications
 - **WebRTC**: For comparison purposes, apply WebRTC built-in `noise_suppression` to the audio
+
+## Web UI (Gradio)
+
+Run the Gradio web interface locally:
+
+```bash
+python app.py
+```
+
+### Deploy to Hugging Face Spaces
+
+1. Create a new Space on [Hugging Face](https://huggingface.co/new-space)
+2. Select "Gradio" as the SDK
+3. Push this repo to the Space
+4. Add your LiveKit credentials as **Secrets** in Space Settings:
+   - `LIVEKIT_URL`
+   - `LIVEKIT_API_KEY`
+   - `LIVEKIT_API_SECRET`
 
 ## License
 
