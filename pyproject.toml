@@ -5,6 +5,7 @@ description = "CLI tool apply LiveKit noise cancellation to individual audio fil
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "gradio>=5.0.0",
     "livekit-agents~=1.2",
     "livekit-plugins-noise-cancellation~=0.2",
     "python-dotenv~=1.1",
